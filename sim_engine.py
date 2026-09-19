@@ -59,6 +59,7 @@ class SimEngine:
         self.replan_latency = 0
         self.collisions = 0
         self.planning = False
+        self.frame_counter = 0
         
         self.load_scenario(self.preset_id)
         
@@ -196,6 +197,7 @@ class SimEngine:
             return
 
         self.time_elapsed += DT
+        self.frame_counter += 1
         
         # 1. Spawn & Cleanup
         self.spawn_obstacles()
@@ -206,20 +208,13 @@ class SimEngine:
             if obs.is_dynamic:
                 obs.position += obs.velocity * DT
 
-        # 3. Perception Map Update
-        # Update ego position for occupancy grid building
+        # 3. Perception — only build occupancy grid when we actually need to plan
         self.ego.position = np.array([self.ego_x, self.ego_y])
         self.ego.yaw = self.ego_yaw
-        
-        # Create temporary scenario object to pass to perception
         self.scenario.ego = self.ego
         self.scenario.obstacles = self.obstacles
         
-        t0 = time.time()
-        occ_grid = build_occupancy_grid(self.scenario)
-        
-        # 4. Hybrid A* Planning
-        # Find closest obstacle in front
+        # 4. Find closest obstacle
         min_dist = 999.0
         min_ttc = 999.0
         for obs in self.obstacles:
@@ -243,8 +238,10 @@ class SimEngine:
             self.state_desc = "Hazard detected. Evaluating swerve feasibility via Hybrid A*."
             
             goal_x = self.ego_x + 40.0
-            # Bias goal to clear lane
             goal_y = -LANE_W/2.0 if self.ego_y > 0 else LANE_W/2.0
+            
+            # Build occupancy grid only when we actually need to plan
+            occ_grid = build_occupancy_grid(self.scenario)
             
             import threading
             threading.Thread(target=self._run_planner_thread, args=(occ_grid, self.ego_x, self.ego_y, self.ego_yaw, goal_x, goal_y)).start()
@@ -289,53 +286,52 @@ class SimEngine:
         if len(self.trail) > 100:
             self.trail.pop(0)
             
-        # 6. Build JSON Frame
-        frame = {
-            "time": round(self.time_elapsed, 1),
-            "ego": {
-                "x": self.ego_x,
-                "y": self.ego_y,
-                "yaw": self.ego_yaw,
-                "speed": round(actual_speed * 3.6, 1), # km/h
-                "w": self.ego.length,
-                "h": self.ego.width
-            },
-            "obstacles": [
-                {
-                    "x": o.position[0],
-                    "y": o.position[1],
-                    "yaw": o.yaw,
-                    "w": o.length,
-                    "h": o.width,
-                    "color": o.color,
-                    "label": o.label,
-                    "speed": round(np.linalg.norm(o.velocity) * 3.6, 1)
-                } for o in self.obstacles
-            ],
-            "path": self.planned_path,
-            "trail": self.trail,
-            "telemetry": {
-                "speed": round(actual_speed * 3.6, 1),
-                "replanLatency": self.replan_latency,
-                "replans": self.replan_count,
-                "trackedActors": len(self.obstacles),
-                "minTTC": f"{min_ttc:.1f}s" if min_ttc < 99.0 else "— clear",
-                "distance": int(self.ego_x),
-                "collisions": self.collisions
-            },
-            "state": self.stateflow,
-            "stateDetail": self.state_desc,
-            "sensorWedge": [
-                [self.ego_x, self.ego_y - 0.9],
-                [self.ego_x + DETECT_DIST, -LANE_W],
-                [self.ego_x + DETECT_DIST,  LANE_W],
-                [self.ego_x, self.ego_y + 0.9]
-            ]
-        }
-        
-        # Flush to stdout
-        sys.stdout.write(json.dumps(frame) + '\n')
-        sys.stdout.flush()
+        # 6. Build JSON Frame — throttle to every 2nd tick (~15fps to reduce I/O)
+        if self.frame_counter % 2 == 0:
+            frame = {
+                "time": round(self.time_elapsed, 1),
+                "ego": {
+                    "x": self.ego_x,
+                    "y": self.ego_y,
+                    "yaw": self.ego_yaw,
+                    "speed": round(actual_speed * 3.6, 1),
+                    "w": self.ego.length,
+                    "h": self.ego.width
+                },
+                "obstacles": [
+                    {
+                        "x": o.position[0],
+                        "y": o.position[1],
+                        "yaw": o.yaw,
+                        "w": o.length,
+                        "h": o.width,
+                        "color": o.color,
+                        "label": o.label,
+                        "speed": round(np.linalg.norm(o.velocity) * 3.6, 1)
+                    } for o in self.obstacles
+                ],
+                "path": self.planned_path,
+                "trail": self.trail,
+                "telemetry": {
+                    "speed": round(actual_speed * 3.6, 1),
+                    "replanLatency": self.replan_latency,
+                    "replans": self.replan_count,
+                    "trackedActors": len(self.obstacles),
+                    "minTTC": f"{min_ttc:.1f}s" if min_ttc < 99.0 else "— clear",
+                    "distance": int(self.ego_x),
+                    "collisions": self.collisions
+                },
+                "state": self.stateflow,
+                "stateDetail": self.state_desc,
+                "sensorWedge": [
+                    [self.ego_x, self.ego_y - 0.9],
+                    [self.ego_x + DETECT_DIST, -LANE_W],
+                    [self.ego_x + DETECT_DIST,  LANE_W],
+                    [self.ego_x, self.ego_y + 0.9]
+                ]
+            }
+            sys.stdout.write(json.dumps(frame) + '\n')
+            sys.stdout.flush()
 
 if __name__ == "__main__":
     engine = SimEngine()

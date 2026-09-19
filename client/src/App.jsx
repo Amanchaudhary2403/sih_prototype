@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { io } from 'socket.io-client';
 
 const socket = io({
@@ -19,205 +19,219 @@ function App() {
   const [frameData, setFrameData] = useState(null);
   const [paused, setPaused] = useState(false);
   const canvasRef = useRef(null);
+  const containerRef = useRef(null);
+  const latestFrame = useRef(null);
+  const rafId = useRef(null);
 
+  // Connect to socket and store latest frame in a ref (no re-render per frame)
   useEffect(() => {
-    socket.on('frame', (data) => setFrameData(data));
+    socket.on('frame', (data) => {
+      latestFrame.current = data;
+    });
     socket.emit('command', { action: 'load', preset: 5 });
     return () => socket.off('frame');
   }, []);
 
-  useEffect(() => {
-    if (!canvasRef.current || !frameData) return;
+  // Resize canvas to match its container pixel-for-pixel
+  const resizeCanvas = useCallback(() => {
     const canvas = canvasRef.current;
+    const container = containerRef.current;
+    if (!canvas || !container) return;
+    const rect = container.getBoundingClientRect();
+    canvas.width = rect.width;
+    canvas.height = rect.height;
+  }, []);
+
+  useEffect(() => {
+    resizeCanvas();
+    window.addEventListener('resize', resizeCanvas);
+    return () => window.removeEventListener('resize', resizeCanvas);
+  }, [resizeCanvas]);
+
+  // Use requestAnimationFrame for smooth 60fps rendering
+  useEffect(() => {
+    function draw() {
+      const canvas = canvasRef.current;
+      if (!canvas) { rafId.current = requestAnimationFrame(draw); return; }
+      const frame = latestFrame.current;
+      if (frame) {
+        setFrameData(frame); // update React state once per rAF for bottom panel
+        renderCanvas(canvas, frame);
+      }
+      rafId.current = requestAnimationFrame(draw);
+    }
+    rafId.current = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(rafId.current);
+  }, []);
+
+  const renderCanvas = (canvas, f) => {
     const ctx = canvas.getContext('2d');
-    const width = canvas.width;
-    const height = canvas.height;
+    const W = canvas.width;
+    const H = canvas.height;
+    if (W === 0 || H === 0) return;
 
-    // Clear and background
+    // Clear
     ctx.fillStyle = '#0d121c';
-    ctx.fillRect(0, 0, width, height);
+    ctx.fillRect(0, 0, W, H);
 
-    const pixelsPerMeter = 10;
-    const egoWorldX = frameData.ego.x;
-    
-    // We want ego car near the left side so it can look ahead at the obstacles.
-    const egoScreenX = width * 0.15;
+    const PPM = W / 120;  // pixels-per-meter: scale so ~120m of road fills the screen
+    const egoScrX = W * 0.18; // ego pinned 18% from left
+    const egoWX = f.ego.x;
 
-    function worldToScreen(wx, wy) {
-      const sx = egoScreenX + (wx - egoWorldX) * pixelsPerMeter;
-      const sy = height / 2 - wy * pixelsPerMeter; // Y is inverted in canvas vs plot
-      return [sx, sy];
-    }
+    const w2s = (wx, wy) => [
+      egoScrX + (wx - egoWX) * PPM,
+      H / 2 - wy * PPM
+    ];
 
-    // Grid / Axes Background
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+    // ── Grid lines ──
+    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
     ctx.lineWidth = 1;
-    // Draw horizontal grid lines (fake)
-    for(let i = -6; i <= 6; i += 2) {
-      const [_, sy] = worldToScreen(egoWorldX, i);
-      ctx.beginPath();
-      ctx.moveTo(0, sy);
-      ctx.lineTo(width, sy);
-      ctx.stroke();
+    for (let y = -6; y <= 6; y += 2) {
+      const [, sy] = w2s(egoWX, y);
+      ctx.beginPath(); ctx.moveTo(0, sy); ctx.lineTo(W, sy); ctx.stroke();
     }
 
-    // Road lines (Solid white edges, dashed yellow center)
-    const roadHalfWidth = 3.5 * pixelsPerMeter;
-    
-    ctx.beginPath();
-    ctx.moveTo(0, height / 2 - roadHalfWidth);
-    ctx.lineTo(width, height / 2 - roadHalfWidth);
-    ctx.moveTo(0, height / 2 + roadHalfWidth);
-    ctx.lineTo(width, height / 2 + roadHalfWidth);
+    // ── Road ──
+    const roadHalf = 3.5 * PPM;
+    // Asphalt fill
+    ctx.fillStyle = '#181f2a';
+    ctx.fillRect(0, H/2 - roadHalf, W, roadHalf * 2);
+    // White edge lines
     ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 3;
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.setLineDash([15, 15]);
-    ctx.moveTo(0, height / 2);
-    ctx.lineTo(width, height / 2);
-    ctx.strokeStyle = '#fbbf24';
     ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, H/2 - roadHalf); ctx.lineTo(W, H/2 - roadHalf);
+    ctx.moveTo(0, H/2 + roadHalf); ctx.lineTo(W, H/2 + roadHalf);
+    ctx.stroke();
+    // Yellow dashed center line
+    ctx.beginPath();
+    ctx.setLineDash([PPM * 1.5, PPM * 1.5]);
+    ctx.strokeStyle = '#fbbf24';
+    ctx.lineWidth = 3;
+    ctx.moveTo(0, H/2); ctx.lineTo(W, H/2);
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Draw Trail (Solid blue line)
-    if (frameData.trail && frameData.trail.length > 0) {
+    // ── Trail (blue solid) ──
+    if (f.trail && f.trail.length > 1) {
       ctx.beginPath();
-      const [sx0, sy0] = worldToScreen(frameData.trail[0][0], frameData.trail[0][1]);
-      ctx.moveTo(sx0, sy0);
-      for (let i = 1; i < frameData.trail.length; i++) {
-        const [sx, sy] = worldToScreen(frameData.trail[i][0], frameData.trail[i][1]);
+      let [sx, sy] = w2s(f.trail[0][0], f.trail[0][1]);
+      ctx.moveTo(sx, sy);
+      for (let i = 1; i < f.trail.length; i++) {
+        [sx, sy] = w2s(f.trail[i][0], f.trail[i][1]);
         ctx.lineTo(sx, sy);
       }
-      ctx.strokeStyle = '#0284c7'; // Darker blue
+      ctx.strokeStyle = '#0ea5e9';
       ctx.lineWidth = 2;
       ctx.stroke();
     }
 
-    // Draw Sensor Wedge (Faint dark grey)
-    if (frameData.sensorWedge) {
+    // ── Sensor wedge ──
+    if (f.sensorWedge) {
       ctx.beginPath();
-      const [sx0, sy0] = worldToScreen(frameData.sensorWedge[0][0], frameData.sensorWedge[0][1]);
-      ctx.moveTo(sx0, sy0);
-      for (let i = 1; i < frameData.sensorWedge.length; i++) {
-        const [sx, sy] = worldToScreen(frameData.sensorWedge[i][0], frameData.sensorWedge[i][1]);
+      let [sx, sy] = w2s(f.sensorWedge[0][0], f.sensorWedge[0][1]);
+      ctx.moveTo(sx, sy);
+      for (let i = 1; i < f.sensorWedge.length; i++) {
+        [sx, sy] = w2s(f.sensorWedge[i][0], f.sensorWedge[i][1]);
         ctx.lineTo(sx, sy);
       }
       ctx.closePath();
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.05)';
+      ctx.fillStyle = f.state === 'EVADE'
+        ? 'rgba(239, 68, 68, 0.12)'
+        : 'rgba(255, 255, 255, 0.04)';
       ctx.fill();
     }
 
-    // Draw Planned Path (Dashed green line)
-    if (frameData.path && frameData.path.length > 0) {
+    // ── Planned path (dashed green) ──
+    if (f.path && f.path.length > 1) {
       ctx.beginPath();
-      ctx.setLineDash([10, 5]);
-      const [sx0, sy0] = worldToScreen(frameData.path[0][0], frameData.path[0][1]);
-      ctx.moveTo(sx0, sy0);
-      for (let i = 1; i < frameData.path.length; i++) {
-        const [sx, sy] = worldToScreen(frameData.path[i][0], frameData.path[i][1]);
+      ctx.setLineDash([8, 4]);
+      let [sx, sy] = w2s(f.path[0][0], f.path[0][1]);
+      ctx.moveTo(sx, sy);
+      for (let i = 1; i < f.path.length; i++) {
+        [sx, sy] = w2s(f.path[i][0], f.path[i][1]);
         ctx.lineTo(sx, sy);
       }
       ctx.strokeStyle = '#10b981';
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2.5;
       ctx.stroke();
       ctx.setLineDash([]);
     }
 
-    // Draw Obstacles & Callouts
-    if (frameData.obstacles) {
-      frameData.obstacles.forEach(obs => {
-        const [sx, sy] = worldToScreen(obs.x, obs.y);
-        const w = obs.w * pixelsPerMeter;
-        const h = obs.h * pixelsPerMeter;
-        
+    // ── Obstacles ──
+    if (f.obstacles) {
+      f.obstacles.forEach(obs => {
+        const [sx, sy] = w2s(obs.x, obs.y);
+        const ow = obs.w * PPM;
+        const oh = obs.h * PPM;
+
         ctx.save();
         ctx.translate(sx, sy);
-        ctx.rotate(-obs.yaw || 0); // Inverted Y means inverted rotation
         ctx.fillStyle = obs.color || '#ef4444';
-        
-        // Draw obstacle body with white border
-        ctx.fillRect(-w/2, -h/2, w, h);
-        ctx.strokeStyle = '#ffffff';
+        ctx.fillRect(-ow/2, -oh/2, ow, oh);
+        ctx.strokeStyle = '#fff';
         ctx.lineWidth = 1.5;
-        ctx.strokeRect(-w/2, -h/2, w, h);
+        ctx.strokeRect(-ow/2, -oh/2, ow, oh);
         ctx.restore();
 
-        // Draw Callout pointing to it (Matplotlib style)
-        // Check if label contains speed, if not add it
-        const labelText = obs.speed > 0 ? `${obs.label} (${obs.speed}m/s)` : obs.label;
+        // Callout label
+        const label = obs.speed > 0 ? `${obs.label} (${obs.speed}m/s)` : obs.label;
         ctx.font = 'bold 11px sans-serif';
-        const textWidth = ctx.measureText(labelText).width;
-        
-        // Line pointing up or down depending on Y position
-        const isTop = obs.y > 0;
-        const calloutY = isTop ? sy - 60 : sy + 60;
-        
+        const tw = ctx.measureText(label).width;
+        const above = obs.y > 0;
+        const cy = above ? sy - 55 : sy + 55;
+
+        // Vertical line
         ctx.beginPath();
-        ctx.moveTo(sx, sy + (isTop ? -h/2 : h/2));
-        ctx.lineTo(sx, calloutY);
+        ctx.moveTo(sx, sy + (above ? -oh/2 : oh/2));
+        ctx.lineTo(sx, cy);
         ctx.strokeStyle = obs.color || '#ef4444';
         ctx.lineWidth = 1.5;
         ctx.stroke();
-        
-        // Draw arrow tip
-        ctx.beginPath();
-        ctx.moveTo(sx, sy + (isTop ? -h/2 : h/2));
-        ctx.lineTo(sx - 4, sy + (isTop ? -h/2 - 6 : h/2 + 6));
-        ctx.lineTo(sx + 4, sy + (isTop ? -h/2 - 6 : h/2 + 6));
-        ctx.fillStyle = obs.color || '#ef4444';
-        ctx.fill();
 
-        // Draw text box
-        const boxX = sx - textWidth / 2 - 6;
-        const boxY = calloutY - (isTop ? 20 : 0);
+        // Label box
+        const bx = sx - tw/2 - 6;
+        const by = above ? cy - 18 : cy;
         ctx.fillStyle = obs.color || '#ef4444';
         ctx.beginPath();
-        ctx.roundRect(boxX, boxY, textWidth + 12, 20, 4);
+        ctx.roundRect(bx, by, tw + 12, 20, 4);
         ctx.fill();
-        ctx.strokeStyle = '#ffffff';
-        ctx.stroke();
-        
-        ctx.fillStyle = '#ffffff';
-        ctx.fillText(labelText, sx - textWidth / 2, boxY + 14);
+        ctx.fillStyle = '#fff';
+        ctx.fillText(label, sx - tw/2, by + 14);
       });
     }
 
-    // Draw Ego
-    const [egoSx, egoSy] = worldToScreen(frameData.ego.x, frameData.ego.y);
-    const ew = frameData.ego.w * pixelsPerMeter;
-    const eh = frameData.ego.h * pixelsPerMeter;
-    
-    ctx.save();
-    ctx.translate(egoSx, egoSy);
-    ctx.rotate(-frameData.ego.yaw); // Inverted
-    
-    // Draw body (cyan fill, white border)
-    ctx.fillStyle = '#06b6d4';
-    ctx.fillRect(-ew/2, -eh/2, ew, eh);
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(-ew/2, -eh/2, ew, eh);
-    
-    // Draw heading arrow (white triangle)
-    ctx.beginPath();
-    ctx.moveTo(ew/2 + 8, 0);
-    ctx.lineTo(ew/2, -6);
-    ctx.lineTo(ew/2, 6);
-    ctx.closePath();
-    ctx.fillStyle = '#ffffff';
-    ctx.fill();
-    ctx.restore();
+    // ── Ego vehicle ──
+    {
+      const [sx, sy] = w2s(f.ego.x, f.ego.y);
+      const ew = f.ego.w * PPM;
+      const eh = f.ego.h * PPM;
 
-    // Axis Labels
+      ctx.save();
+      ctx.translate(sx, sy);
+      ctx.rotate(-f.ego.yaw);
+      ctx.fillStyle = '#06b6d4';
+      ctx.fillRect(-ew/2, -eh/2, ew, eh);
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(-ew/2, -eh/2, ew, eh);
+      // Heading arrow
+      ctx.beginPath();
+      ctx.moveTo(ew/2 + 8, 0);
+      ctx.lineTo(ew/2, -6);
+      ctx.lineTo(ew/2, 6);
+      ctx.closePath();
+      ctx.fillStyle = '#fff';
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // ── Axis labels ──
     ctx.fillStyle = '#64748b';
-    ctx.font = '10px sans-serif';
-    ctx.fillText('Lateral Offset (m)', 10, height / 2 + 50);
-    ctx.fillText('Longitudinal Distance (m)', width / 2, height - 10);
-
-  }, [frameData]);
+    ctx.font = '12px sans-serif';
+    ctx.fillText('Lateral Offset (m)', 15, H/2 + roadHalf + 18);
+    ctx.fillText('Longitudinal Distance (m)', W/2 - 80, H - 8);
+  };
 
   const handleScenarioChange = (id) => {
     setActiveScenario(id);
@@ -226,19 +240,17 @@ function App() {
   };
 
   const togglePause = () => {
-    const nextState = !paused;
-    setPaused(nextState);
-    socket.emit('command', { action: nextState ? 'pause' : 'resume' });
+    const next = !paused;
+    setPaused(next);
+    socket.emit('command', { action: next ? 'pause' : 'resume' });
   };
 
-  const activeTitle = SCENARIOS.find(s => s.id === activeScenario)?.name || 'Scenario';
-  
-  // Status logic
+  const activeTitle = SCENARIOS.find(s => s.id === activeScenario)?.name || '';
+
   let perceptionStatus = 'LANE CLEAR';
   let perceptionColor = 'green';
   let autonomousState = 'CRUISE';
   let stateColor = 'green';
-  
   if (frameData?.state === 'EVADE') {
     perceptionStatus = 'HAZARD DETECTED';
     perceptionColor = 'yellow';
@@ -253,14 +265,11 @@ function App() {
 
   return (
     <div className="app-container">
-      {/* Title */}
       <div className="title-bar">
         Bird's-Eye View — {activeTitle} | t={frameData?.time || 0}s | Replans: {frameData?.telemetry?.replans || 0}
       </div>
 
-      {/* Main Canvas Area */}
-      <div className="plot-container">
-        {/* Legend Overlay */}
+      <div className="plot-container" ref={containerRef}>
         <div className="legend">
           <div className="legend-item">
             <div className="legend-line planned"></div>
@@ -271,20 +280,13 @@ function App() {
             <span>Ego Path History</span>
           </div>
         </div>
-
-        <canvas 
-          ref={canvasRef} 
-          width={1200} 
-          height={500}
-          style={{ width: '100%', height: '100%' }}
-        />
+        <canvas ref={canvasRef} />
       </div>
 
-      {/* Bottom Panel */}
       <div className="bottom-panel">
         <div className="scenario-list">
           {SCENARIOS.map(s => (
-            <div 
+            <div
               key={s.id}
               className={`scenario-item ${activeScenario === s.id ? 'active' : ''}`}
               onClick={() => handleScenarioChange(s.id)}
@@ -293,7 +295,7 @@ function App() {
             </div>
           ))}
           <div className="scenario-item" style={{ textAlign: 'center', color: '#60a5fa', fontWeight: 'bold' }}>
-            Scenario: {activeTitle} 
+            Scenario: {activeTitle}
           </div>
         </div>
 
