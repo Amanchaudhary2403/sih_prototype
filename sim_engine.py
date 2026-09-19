@@ -154,6 +154,18 @@ class SimEngine:
                     position=np.array([spawn_x, lane]), yaw=0.0, speed=0, velocity=np.array([0., 0.]),
                     is_dynamic=False, class_id=2, color="#a16207", label="Cow"
                 ))
+            elif self.preset_id == 6:
+                # Stray Dog + Parked Van
+                self.obstacles.append(Vehicle(
+                    name="Parked Van", length=4.5, width=2.0, height=2.2,
+                    position=np.array([spawn_x, -1.75]), yaw=0.0, speed=0, velocity=np.array([0., 0.]),
+                    is_dynamic=False, class_id=2, color="#6366f1", label="Van"
+                ))
+                self.obstacles.append(Vehicle(
+                    name="Stray Dog", length=0.8, width=0.4, height=0.6,
+                    position=np.array([spawn_x - 15.0, 1.75]), yaw=0.0, speed=0.7, velocity=np.array([0., -0.7]),
+                    is_dynamic=True, class_id=2, color="#d97706", label="Dog"
+                ))
 
     def cleanup_obstacles(self):
         """Remove obstacles that have passed behind the ego to save memory."""
