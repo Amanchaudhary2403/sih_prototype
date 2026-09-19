@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { io } from 'socket.io-client';
 
-const socket = io('http://localhost:3001');
+// Empty io() automatically connects to the host serving the page (perfect for deployment)
+const socket = io({
+  transports: ['websocket', 'polling'] // Add fallback
+});
 
 const SCENARIOS = [
   { id: 1, name: '01 UNMARKED VILLAGE ROAD' },
@@ -38,25 +41,39 @@ function App() {
     const width = canvasRef.current.width;
     const height = canvasRef.current.height;
     
-    // Clear
-    ctx.clearRect(0, 0, width, height);
+    const pixelsPerMeter = 12;
     
-    // Draw Road (Dark gray strip)
-    ctx.fillStyle = 'rgba(255, 255, 255, 0.03)';
-    ctx.fillRect(0, height / 2 - 40, width, 80);
+    // Clear background (Dark theme from main_sim)
+    ctx.fillStyle = '#111a26';
+    ctx.fillRect(0, 0, width, height);
     
-    // Dashed center line
+    // Draw Road (Gray asphalt)
+    const roadWidthPixels = 7.0 * pixelsPerMeter; // 3.5m lanes * 2
+    ctx.fillStyle = '#222222';
+    ctx.fillRect(0, height / 2 - roadWidthPixels/2, width, roadWidthPixels);
+    
+    // Solid white edge lines
     ctx.beginPath();
-    ctx.setLineDash([20, 20]);
+    ctx.moveTo(0, height / 2 - roadWidthPixels/2);
+    ctx.lineTo(width, height / 2 - roadWidthPixels/2);
+    ctx.moveTo(0, height / 2 + roadWidthPixels/2);
+    ctx.lineTo(width, height / 2 + roadWidthPixels/2);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Dashed center line (Yellow)
+    ctx.beginPath();
+    ctx.setLineDash([15, 15]);
     ctx.moveTo(0, height / 2);
     ctx.lineTo(width, height / 2);
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+    ctx.strokeStyle = '#ffcc00';
+    ctx.lineWidth = 2;
     ctx.stroke();
     ctx.setLineDash([]);
     
-    // Camera transform: ego is always at x = width * 0.2
-    const egoScreenX = width * 0.2;
-    const pixelsPerMeter = 12;
+    // Camera transform: ego is always at x = width * 0.15 (left side)
+    const egoScreenX = width * 0.15;
     const egoWorldX = frameData.ego.x;
     
     function worldToScreen(wx, wy) {
@@ -147,8 +164,22 @@ function App() {
     ctx.save();
     ctx.translate(egoSx, egoSy);
     ctx.rotate(frameData.ego.yaw);
-    ctx.fillStyle = '#00d4ff';
+    // Draw body
+    ctx.fillStyle = '#004455';
     ctx.fillRect(-ew/2, -eh/2, ew, eh);
+    // Draw thick cyan border
+    ctx.strokeStyle = '#00ffcc';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(-ew/2, -eh/2, ew, eh);
+    
+    // Draw heading triangle (like the Matplotlib wedge)
+    ctx.beginPath();
+    ctx.moveTo(ew/2 + 10, 0);
+    ctx.lineTo(ew/2, -8);
+    ctx.lineTo(ew/2, 8);
+    ctx.closePath();
+    ctx.fillStyle = '#00ffcc';
+    ctx.fill();
     ctx.restore();
 
   }, [frameData, layers]);
