@@ -40,10 +40,8 @@ function App() {
     const pixelsPerMeter = 10;
     const egoWorldX = frameData.ego.x;
     
-    // We want ego car near the right if possible, or left if scrolling.
-    // The screenshot shows the car at x=110 on the right, meaning the camera is static or fixed.
-    // We'll use a fixed trailing camera: Ego is at 80% of screen width.
-    const egoScreenX = width * 0.8;
+    // We want ego car near the left side so it can look ahead at the obstacles.
+    const egoScreenX = width * 0.15;
 
     function worldToScreen(wx, wy) {
       const sx = egoScreenX + (wx - egoWorldX) * pixelsPerMeter;

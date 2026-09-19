@@ -12,7 +12,7 @@ from dynamic_planner import plan_avoidance_path
 # ============================================================================
 # Simulation Settings
 # ============================================================================
-DT = 0.05               # Physics tick (20 Hz)
+DT = 0.03               # Physics tick (20 Hz)
 EGO_SPEED = 10.0        # Cruise speed (m/s)
 DETECT_DIST = 35.0      # LiDAR range
 LANE_W = 3.5
@@ -58,6 +58,7 @@ class SimEngine:
         self.last_replan_time = 0
         self.replan_latency = 0
         self.collisions = 0
+        self.planning = False
         
         self.load_scenario(self.preset_id)
         
@@ -80,6 +81,7 @@ class SimEngine:
         self.time_elapsed = 0.0
         self.replan_count = 0
         self.collisions = 0
+        self.planning = False
         
         self.stateflow = "CRUISE"
         self.state_desc = "Maintaining lane center and nominal speed."
@@ -171,6 +173,24 @@ class SimEngine:
         """Remove obstacles that have passed behind the ego to save memory."""
         self.obstacles = [o for o in self.obstacles if o.position[0] > self.ego_x - 30.0]
 
+
+    def _run_planner_thread(self, occ_grid, ego_x, ego_y, ego_yaw, goal_x, goal_y):
+        self.planning = True
+        t_plan = time.time()
+        path_xy, path_yaw, success = plan_avoidance_path(
+            occ_grid, np.array([ego_x, ego_y]), ego_yaw, np.array([goal_x, goal_y])
+        )
+        self.replan_latency = int((time.time() - t_plan) * 1000)
+        
+        if success and path_xy is not None:
+            self.planned_path = path_xy.tolist()
+            self.replan_count += 1
+            self.last_replan_time = time.time()
+        else:
+            self.stateflow = "BRAKING"
+            self.state_desc = "Lateral clearance insufficient. Falling back to braking profile."
+        self.planning = False
+
     def tick(self):
         if self.paused:
             return
@@ -218,7 +238,7 @@ class SimEngine:
 
         needs_replan = (min_dist < DETECT_DIST)
 
-        if needs_replan and (time.time() - self.last_replan_time > 0.5):
+        if needs_replan and (time.time() - self.last_replan_time > 0.5) and not getattr(self, 'planning', False):
             self.stateflow = "EVADE"
             self.state_desc = "Hazard detected. Evaluating swerve feasibility via Hybrid A*."
             
@@ -226,19 +246,8 @@ class SimEngine:
             # Bias goal to clear lane
             goal_y = -LANE_W/2.0 if self.ego_y > 0 else LANE_W/2.0
             
-            t_plan = time.time()
-            path_xy, path_yaw, success = plan_avoidance_path(
-                occ_grid, np.array([self.ego_x, self.ego_y]), self.ego_yaw, np.array([goal_x, goal_y])
-            )
-            self.replan_latency = int((time.time() - t_plan) * 1000)
-            
-            if success and path_xy is not None:
-                self.planned_path = path_xy.tolist()
-                self.replan_count += 1
-                self.last_replan_time = time.time()
-            else:
-                self.stateflow = "BRAKING"
-                self.state_desc = "Lateral clearance insufficient. Falling back to braking profile."
+            import threading
+            threading.Thread(target=self._run_planner_thread, args=(occ_grid, self.ego_x, self.ego_y, self.ego_yaw, goal_x, goal_y)).start()
         elif not needs_replan:
             self.stateflow = "CRUISE"
             self.state_desc = "Maintaining lane center and nominal speed."

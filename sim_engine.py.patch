@@ -1,0 +1,73 @@
+--- sim_engine.py
++++ sim_engine.py
+@@ -19,7 +19,7 @@
+     return np.column_stack((x_interp, y_interp))
+ 
+ # ============================================================================
+-DT = 0.05               # Physics tick (20 Hz)
++DT = 0.033              # Physics tick (30 Hz for smoother frontend)
+ EGO_SPEED = 10.0        # Cruise speed (m/s)
+ DETECT_DIST = 35.0      # LiDAR range
+ LANE_W = 3.5
+@@ -43,6 +43,7 @@
+         self.last_replan_time = 0
+         self.replan_latency = 0
+         self.collisions = 0
++        self.planning = False
+         
+         self.load_scenario(self.preset_id)
+         
+@@ -165,6 +166,22 @@
+         """Remove obstacles that have passed behind the ego to save memory."""
+         self.obstacles = [o for o in self.obstacles if o.position[0] > self.ego_x - 30.0]
+ 
++    def _run_planner_thread(self, occ_grid, ego_x, ego_y, ego_yaw, goal_x, goal_y):
++        self.planning = True
++        t_plan = time.time()
++        path_xy, path_yaw, success = plan_avoidance_path(
++            occ_grid, np.array([ego_x, ego_y]), ego_yaw, np.array([goal_x, goal_y])
++        )
++        self.replan_latency = int((time.time() - t_plan) * 1000)
++        
++        if success and path_xy is not None:
++            self.planned_path = path_xy.tolist()
++            self.replan_count += 1
++            self.last_replan_time = time.time()
++        else:
++            self.stateflow = "BRAKING"
++            self.state_desc = "Lateral clearance insufficient. Falling back to braking profile."
++        self.planning = False
++
+     def tick(self):
+         if self.paused:
+             return
+@@ -208,21 +225,12 @@
+ 
+         needs_replan = (min_dist < DETECT_DIST)
+ 
+-        if needs_replan and (time.time() - self.last_replan_time > 0.5):
++        if needs_replan and (time.time() - self.last_replan_time > 0.5) and not self.planning:
+             self.stateflow = "EVADE"
+             self.state_desc = "Hazard detected. Evaluating swerve feasibility via Hybrid A*."
+             
+             goal_x = self.ego_x + 40.0
+             # Bias goal to clear lane
+             goal_y = -LANE_W/2.0 if self.ego_y > 0 else LANE_W/2.0
+             
+-            t_plan = time.time()
+-            path_xy, path_yaw, success = plan_avoidance_path(
+-                occ_grid, np.array([self.ego_x, self.ego_y]), self.ego_yaw, np.array([goal_x, goal_y])
+-            )
+-            self.replan_latency = int((time.time() - t_plan) * 1000)
+-            
+-            if success and path_xy is not None:
+-                self.planned_path = path_xy.tolist()
+-                self.replan_count += 1
+-                self.last_replan_time = time.time()
+-            else:
+-                self.stateflow = "BRAKING"
+-                self.state_desc = "Lateral clearance insufficient. Falling back to braking profile."
++            threading.Thread(target=self._run_planner_thread, args=(occ_grid, self.ego_x, self.ego_y, self.ego_yaw, goal_x, goal_y)).start()
++
+         elif not needs_replan:
+             self.stateflow = "CRUISE"
